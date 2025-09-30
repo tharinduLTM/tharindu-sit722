@@ -1,0 +1,106 @@
+name: CI - Test, Build & Push (testing branch)
+
+on:
+  push:
+    branches: [ testing ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PyTests (matrix over services)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+
+    strategy:
+      matrix:
+        svc: [product_service, customer_service, order_service]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        working-directory: backend/${{ matrix.svc }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install pytest
+
+      - name: Run pytest
+        working-directory: backend/${{ matrix.svc }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+          POSTGRES_HOST: postgres
+          POSTGRES_PORT: 5432
+        run: pytest -q
+
+  build_push:
+    name: Build & Push images to ACR
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Set IMAGE_TAG
+        id: vars
+        run: echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push product_service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend/product_service
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/product-service:${{ steps.vars.outputs.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/product-service:testing-latest
+
+      - name: Build & Push customer_service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend/customer_service
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/customer-service:${{ steps.vars.outputs.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/customer-service:testing-latest
+
+      - name: Build & Push order_service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend/order_service
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/order-service:${{ steps.vars.outputs.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/order-service:testing-latest
+
+      - name: Build & Push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ steps.vars.outputs.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/frontend:testing-latest
