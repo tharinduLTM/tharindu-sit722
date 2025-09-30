@@ -36,12 +36,19 @@ logger = logging.getLogger(__name__)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
-# --- Service URLs Configuration ---
-CUSTOMER_SERVICE_URL = os.getenv("CUSTOMER_SERVICE_URL", "http://localhost:8002")
-logger.info(
-    f"Order Service: Configured to communicate with Customer Service at: {CUSTOMER_SERVICE_URL}"
-)
+# --- Environment / Feature Flags ---
+TESTING = os.getenv("TESTING", "0") == "1"
 
+# --- Service URLs Configuration ---
+# NOTE: Tests import PRODUCT_SERVICE_URL from this module.
+PRODUCT_SERVICE_URL = os.getenv("PRODUCT_SERVICE_URL", "http://localhost:8001")
+CUSTOMER_SERVICE_URL = os.getenv("CUSTOMER_SERVICE_URL", "http://localhost:8002")
+
+logger.info(
+    "Order Service: Configured endpoints -> PRODUCT_SERVICE_URL=%s, CUSTOMER_SERVICE_URL=%s",
+    PRODUCT_SERVICE_URL,
+    CUSTOMER_SERVICE_URL,
+)
 
 # --- RabbitMQ Configuration ---
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
@@ -70,7 +77,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # --- RabbitMQ Helper Functions ---
 async def connect_to_rabbitmq():
     """Establishes an asynchronous connection to RabbitMQ."""
@@ -85,7 +91,9 @@ async def connect_to_rabbitmq():
     for i in range(max_retries):
         try:
             logger.info(
-                f"Order Service: Attempting to connect to RabbitMQ (attempt {i+1}/{max_retries})..."
+                "Order Service: Attempting to connect to RabbitMQ (attempt %s/%s)...",
+                i + 1,
+                max_retries,
             )
             rabbitmq_connection = await aio_pika.connect_robust(rabbitmq_url)
             rabbitmq_channel = await rabbitmq_connection.channel()
@@ -98,12 +106,14 @@ async def connect_to_rabbitmq():
             )
             return True
         except Exception as e:
-            logger.warning(f"Order Service: Failed to connect to RabbitMQ: {e}")
+            logger.warning("Order Service: Failed to connect to RabbitMQ: %s", e)
             if i < max_retries - 1:
                 await asyncio.sleep(retry_delay_seconds)
             else:
                 logger.critical(
-                    f"Order Service: Failed to connect to RabbitMQ after {max_retries} attempts. RabbitMQ functionality will be limited."
+                    "Order Service: Failed to connect to RabbitMQ after %s attempts. "
+                    "RabbitMQ functionality will be limited.",
+                    max_retries,
                 )
                 return False
     return False
@@ -120,7 +130,8 @@ async def publish_event(routing_key: str, message_data: dict):
     """Publishes a message to the RabbitMQ exchange."""
     if not rabbitmq_exchange:
         logger.error(
-            f"Order Service: RabbitMQ exchange not available. Cannot publish event '{routing_key}'."
+            "Order Service: RabbitMQ exchange not available. Cannot publish event '%s'.",
+            routing_key,
         )
         return
     try:
@@ -128,16 +139,13 @@ async def publish_event(routing_key: str, message_data: dict):
         message = aio_pika.Message(
             body=message_body,
             content_type="application/json",
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,  # Make message persistent
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,  # persistent
         )
         await rabbitmq_exchange.publish(message, routing_key=routing_key)
-        logger.info(
-            f"Order Service: Published event '{routing_key}' with data: {message_data}"
-        )
+        logger.info("Order Service: Published event '%s' with data: %s", routing_key, message_data)
     except Exception as e:
         logger.error(
-            f"Order Service: Failed to publish event '{routing_key}': {e}",
-            exc_info=True,
+            "Order Service: Failed to publish event '%s': %s", routing_key, e, exc_info=True
         )
 
 
@@ -160,7 +168,8 @@ async def consume_stock_events(db_session_factory: Session):
             rabbitmq_exchange, routing_key="product.stock.deducted"
         )
         logger.info(
-            f"Order Service: Listening for 'product.stock.deducted' messages on queue '{stock_deducted_queue_name}'."
+            "Order Service: Listening for 'product.stock.deducted' messages on queue '%s'.",
+            stock_deducted_queue_name,
         )
 
         # Declare and bind queue for failed stock deductions
@@ -171,7 +180,8 @@ async def consume_stock_events(db_session_factory: Session):
             rabbitmq_exchange, routing_key="product.stock.deduction.failed"
         )
         logger.info(
-            f"Order Service: Listening for 'product.stock.deduction.failed' messages on queue '{stock_deduction_failed_queue_name}'."
+            "Order Service: Listening for 'product.stock.deduction.failed' messages on queue '%s'.",
+            stock_deduction_failed_queue_name,
         )
 
         # Create a combined consumer for both queues
@@ -184,7 +194,8 @@ async def consume_stock_events(db_session_factory: Session):
 
                     if not order_id:
                         logger.error(
-                            f"Order Service: Received message with no order_id: {message_data}"
+                            "Order Service: Received message with no order_id: %s",
+                            message_data,
                         )
                         return
 
@@ -199,24 +210,30 @@ async def consume_stock_events(db_session_factory: Session):
 
                         if not db_order:
                             logger.warning(
-                                f"Order Service: Received event for non-existent order ID: {order_id}. Routing key: {routing_key}. Skipping update."
+                                "Order Service: Event for non-existent order ID %s (routing key: %s). Skipping.",
+                                order_id,
+                                routing_key,
                             )
                             return
 
                         if routing_key == "product.stock.deducted":
                             db_order.status = "confirmed"
                             logger.info(
-                                f"Order Service: Order {order_id} status updated to 'confirmed' based on stock deduction success."
+                                "Order Service: Order %s status -> 'confirmed' (stock deducted).",
+                                order_id,
                             )
                         elif routing_key == "product.stock.deduction.failed":
-                            db_order.status = "failed"  # New status for failed orders
+                            db_order.status = "failed"
                             logger.warning(
-                                f"Order Service: Order {order_id} status updated to 'failed' based on stock deduction failure. Details: {message_data.get('details')}"
+                                "Order Service: Order %s status -> 'failed' (stock deduction failed). Details: %s",
+                                order_id,
+                                message_data.get("details"),
                             )
-                            # In a real app, you might publish a compensation event here or trigger alerts.
                         else:
                             logger.warning(
-                                f"Order Service: Received unknown routing key '{routing_key}' for order {order_id}."
+                                "Order Service: Unknown routing key '%s' for order %s.",
+                                routing_key,
+                                order_id,
                             )
                             return
 
@@ -224,13 +241,17 @@ async def consume_stock_events(db_session_factory: Session):
                         local_db_session.commit()
                         local_db_session.refresh(db_order)
                         logger.info(
-                            f"Order Service: Order {order_id} status successfully updated to {db_order.status}."
+                            "Order Service: Order %s status successfully updated to %s.",
+                            order_id,
+                            db_order.status,
                         )
 
                     except Exception as db_e:
                         local_db_session.rollback()
                         logger.critical(
-                            f"Order Service: Database error updating order {order_id} status: {db_e}",
+                            "Order Service: Database error updating order %s status: %s",
+                            order_id,
+                            db_e,
                             exc_info=True,
                         )
                     finally:
@@ -238,11 +259,14 @@ async def consume_stock_events(db_session_factory: Session):
 
                 except json.JSONDecodeError as e:
                     logger.error(
-                        f"Order Service: Failed to decode RabbitMQ message body: {e}. Message: {message.body}"
+                        "Order Service: Failed to decode RabbitMQ message body: %s. Message: %s",
+                        e,
+                        message.body,
                     )
                 except Exception as e:
                     logger.error(
-                        f"Order Service: Unhandled error processing stock event message: {e}",
+                        "Order Service: Unhandled error processing stock event message: %s",
+                        e,
                         exc_info=True,
                     )
 
@@ -254,7 +278,8 @@ async def consume_stock_events(db_session_factory: Session):
 
     except Exception as e:
         logger.critical(
-            f"Order Service: Error in RabbitMQ consumer for stock events: {e}",
+            "Order Service: Error in RabbitMQ consumer for stock events: %s",
+            e,
             exc_info=True,
         )
 
@@ -267,7 +292,9 @@ async def startup_event():
     for i in range(max_retries):
         try:
             logger.info(
-                f"Order Service: Attempting to connect to PostgreSQL and create tables (attempt {i+1}/{max_retries})..."
+                "Order Service: Attempting to connect to PostgreSQL and create tables (attempt %s/%s)...",
+                i + 1,
+                max_retries,
             )
             Base.metadata.create_all(bind=engine)
             logger.info(
@@ -275,21 +302,21 @@ async def startup_event():
             )
             break  # Exit loop if successful
         except OperationalError as e:
-            logger.warning(f"Order Service: Failed to connect to PostgreSQL: {e}")
+            logger.warning("Order Service: Failed to connect to PostgreSQL: %s", e)
             if i < max_retries - 1:
                 logger.info(
-                    f"Order Service: Retrying in {retry_delay_seconds} seconds..."
+                    "Order Service: Retrying in %s seconds...", retry_delay_seconds
                 )
                 time.sleep(retry_delay_seconds)
             else:
                 logger.critical(
-                    f"Order Service: Failed to connect to PostgreSQL after {max_retries} attempts. Exiting application."
+                    "Order Service: Failed to connect to PostgreSQL after %s attempts. Exiting application.",
+                    max_retries,
                 )
-                sys.exit(1)  # Critical failure: exit if DB connection is unavailable
+                sys.exit(1)  # Critical failure
         except Exception as e:
             logger.critical(
-                f"Order Service: An unexpected error occurred during database startup: {e}",
-                exc_info=True,
+                "Order Service: Unexpected error during DB startup: %s", e, exc_info=True
             )
             sys.exit(1)
 
@@ -334,60 +361,74 @@ async def create_order(order: OrderCreate, db: Session = Depends(get_db)):
         )
 
     # --- Step 1: Validate customer_id with Customer Service (Synchronous Call) ---
-    async with httpx.AsyncClient() as client:
-        customer_validation_url = f"{CUSTOMER_SERVICE_URL}/customers/{order.user_id}"
-        logger.info(
-            f"Order Service: Validating customer ID {order.user_id} via Customer Service at {customer_validation_url}"
-        )
-        try:
-            response = await client.get(customer_validation_url, timeout=3)
-            response.raise_for_status()  # Raises HTTPStatusError for 4xx/5xx responses
-            customer_data = response.json()
+    if not TESTING:
+        async with httpx.AsyncClient() as client:
+            customer_validation_url = f"{CUSTOMER_SERVICE_URL}/customers/{order.user_id}"
             logger.info(
-                f"Order Service: Customer ID {order.user_id} validated. Customer email: {customer_data.get('email')}"
+                "Order Service: Validating customer ID %s via Customer Service at %s",
+                order.user_id,
+                customer_validation_url,
             )
-
-            # If the order's shipping address is not provided, use the customer's default
-            if not order.shipping_address and customer_data.get("shipping_address"):
-                order.shipping_address = customer_data["shipping_address"]
+            try:
+                response = await client.get(customer_validation_url, timeout=3)
+                response.raise_for_status()  # Raises HTTPStatusError for 4xx/5xx responses
+                customer_data = response.json()
                 logger.info(
-                    f"Order Service: Using customer's default shipping address: {order.shipping_address}"
+                    "Order Service: Customer ID %s validated. Customer email: %s",
+                    order.user_id,
+                    customer_data.get("email"),
                 )
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == status.HTTP_404_NOT_FOUND:
-                logger.warning(
-                    f"Order Service: Customer validation failed for ID {order.user_id}: Customer not found."
+                # If the order's shipping address is not provided, use the customer's default
+                if not order.shipping_address and customer_data.get("shipping_address"):
+                    order.shipping_address = customer_data["shipping_address"]
+                    logger.info(
+                        "Order Service: Using customer's default shipping address: %s",
+                        order.shipping_address,
+                    )
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == status.HTTP_404_NOT_FOUND:
+                    logger.warning(
+                        "Order Service: Customer validation failed for ID %s: not found.",
+                        order.user_id,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid user_id: Customer {order.user_id} not found.",
+                    )
+                else:
+                    logger.error(
+                        "Order Service: Customer service error for ID %s: %s - %s",
+                        order.user_id,
+                        e.response.status_code,
+                        e.response.text,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to validate customer with Customer Service.",
+                    )
+            except httpx.RequestError as e:
+                logger.critical(
+                    "Order Service: Network error communicating with Customer Service: %s",
+                    e,
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid user_id: Customer {order.user_id} not found.",
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Customer Service is currently unavailable. Please try again later.",
                 )
-            else:
+            except Exception as e:
                 logger.error(
-                    f"Order Service: Customer service returned an error for ID {order.user_id}: {e.response.status_code} - {e.response.text}"
+                    "Order Service: Unexpected error during customer validation: %s",
+                    e,
+                    exc_info=True,
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to validate customer with Customer Service.",
+                    detail=f"An unexpected error occurred: {e}",
                 )
-        except httpx.RequestError as e:
-            logger.critical(
-                f"Order Service: Network error communicating with Customer Service: {e}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Customer Service is currently unavailable. Please try again later.",
-            )
-        except Exception as e:
-            logger.error(
-                f"Order Service: An unexpected error occurred during customer validation: {e}",
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"An unexpected error occurred: {e}",
-            )
+    else:
+        logger.info("Order Service: TESTING mode -> skipping external customer validation.")
 
     # --- Step 2: Create the Order in the Order Service DB with 'pending' status ---
     total_amount = sum(
@@ -419,20 +460,18 @@ async def create_order(order: OrderCreate, db: Session = Depends(get_db)):
     try:
         db.commit()
         db.refresh(db_order)
-        db.refresh(
-            db_order, attribute_names=["items"]
-        )  # Ensure items are loaded for response
+        db.refresh(db_order, attribute_names=["items"])  # Ensure items are loaded for response
         logger.info(
-            f"Order Service: Order {db_order.order_id} created with initial 'pending' status for user {db_order.user_id}."
+            "Order Service: Order %s created with initial 'pending' status for user %s.",
+            db_order.order_id,
+            db_order.user_id,
         )
 
         # --- Step 3: Publish 'order.placed' event to RabbitMQ ---
         order_event_data = {
             "order_id": db_order.order_id,
             "user_id": db_order.user_id,
-            "total_amount": float(
-                db_order.total_amount
-            ),  # Convert Decimal for JSON serialization
+            "total_amount": float(db_order.total_amount),  # Decimal -> float for JSON
             "items": [
                 {
                     "product_id": item.product_id,
@@ -442,18 +481,19 @@ async def create_order(order: OrderCreate, db: Session = Depends(get_db)):
                 for item in db_order.items
             ],
             "order_date": db_order.order_date.isoformat(),
-            "status": db_order.status,  # Should be 'pending' at this point
+            "status": db_order.status,  # 'pending' at this point
         }
         await publish_event("order.placed", order_event_data)
         logger.info(
-            f"Order Service: 'order.placed' event published for order {db_order.order_id}."
+            "Order Service: 'order.placed' event published for order %s.", db_order.order_id
         )
 
         return db_order
     except Exception as e:
         db.rollback()
         logger.error(
-            f"Order Service: Error creating order or publishing event: {e}",
+            "Order Service: Error creating order or publishing event: %s",
+            e,
             exc_info=True,
         )
         raise HTTPException(
@@ -482,21 +522,20 @@ def list_orders(
     Includes nested order items in the response.
     """
     logger.info(
-        f"Order Service: Listing orders (skip={skip}, limit={limit}, user_id={user_id}, status='{status}')"
+        "Order Service: Listing orders (skip=%s, limit=%s, user_id=%s, status='%s')",
+        skip, limit, user_id, status
     )
     query = db.query(Order).options(joinedload(Order.items))
 
     if user_id:
         query = query.filter(Order.user_id == user_id)
-        logger.info(f"Order Service: Filtering orders by user_id: {user_id}")
+        logger.info("Order Service: Filtering orders by user_id: %s", user_id)
     if status:
         query = query.filter(Order.status == status)
-        logger.info(f"Order Service: Filtering orders by status: {status}")
+        logger.info("Order Service: Filtering orders by status: %s", status)
 
     orders = query.offset(skip).limit(limit).all()
-    logger.info(
-        f"Order Service: Retrieved {len(orders)} orders (skip={skip}, limit={limit})."
-    )
+    logger.info("Order Service: Retrieved %s orders (skip=%s, limit=%s).", len(orders), skip, limit)
     return orders
 
 
@@ -506,7 +545,7 @@ def list_orders(
     summary="Retrieve a single order by ID",
 )
 def get_order(order_id: int, db: Session = Depends(get_db)):
-    logger.info(f"Order Service: Fetching order with ID: {order_id}")
+    logger.info("Order Service: Fetching order with ID: %s", order_id)
     order = (
         db.query(Order)
         .options(joinedload(Order.items))
@@ -514,14 +553,12 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
         .first()
     )
     if not order:
-        logger.warning(f"Order Service: Order with ID {order_id} not found.")
+        logger.warning("Order Service: Order with ID %s not found.", order_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
 
-    logger.info(
-        f"Order Service: Retrieved order with ID {order_id}. Status: {order.status}"
-    )
+    logger.info("Order Service: Retrieved order with ID %s. Status: %s", order_id, order.status)
     return order
 
 
@@ -534,18 +571,21 @@ async def update_order_status(
     order_id: int, new_status: OrderStatusUpdate, db: Session = Depends(get_db)
 ):
     logger.info(
-        f"Order Service: Attempting to update status for order {order_id} to '{new_status.status}'."
+        "Order Service: Attempting to update status for order %s to '%s'.",
+        order_id,
+        new_status.status,
     )
     db_order = db.query(Order).filter(Order.order_id == order_id).first()
     if not db_order:
         logger.warning(
-            f"Order Service: Order with ID {order_id} not found for status update."
+            "Order Service: Order with ID %s not found for status update.", order_id
         )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
 
-    db_order.status = new_status
+    # FIX: assign the actual string value from the Pydantic model
+    db_order.status = new_status.status
 
     try:
         db.add(db_order)
@@ -553,13 +593,15 @@ async def update_order_status(
         db.refresh(db_order)
         db.refresh(db_order, attribute_names=["items"])
         logger.info(
-            f"Order Service: Order {order_id} status updated to '{db_order.status}'."
+            "Order Service: Order %s status updated to '%s'.", order_id, db_order.status
         )
         return db_order
     except Exception as e:
         db.rollback()
         logger.error(
-            f"Order Service: Error updating status for order {order_id}: {e}",
+            "Order Service: Error updating status for order %s: %s",
+            order_id,
+            e,
             exc_info=True,
         )
         raise HTTPException(
@@ -574,11 +616,11 @@ async def update_order_status(
     summary="Delete an order by ID",
 )
 def delete_order(order_id: int, db: Session = Depends(get_db)):
-    logger.info(f"Order Service: Attempting to delete order with ID: {order_id}")
+    logger.info("Order Service: Attempting to delete order with ID: %s", order_id)
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if not order:
         logger.warning(
-            f"Order Service: Order with ID: {order_id} not found for deletion."
+            "Order Service: Order with ID: %s not found for deletion.", order_id
         )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
@@ -588,11 +630,11 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
         # SQLAlchemy cascade="all, delete-orphan" on relationship handles deleting order_items
         db.delete(order)
         db.commit()
-        logger.info(f"Order Service: Order (ID: {order_id}) deleted successfully.")
+        logger.info("Order Service: Order (ID: %s) deleted successfully.", order_id)
     except Exception as e:
         db.rollback()
         logger.error(
-            f"Order Service: Error deleting order {order_id}: {e}", exc_info=True
+            "Order Service: Error deleting order %s: %s", order_id, e, exc_info=True
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -610,18 +652,15 @@ def get_order_items(order_id: int, db: Session = Depends(get_db)):
     """
     Retrieves all order items belonging to a specific order ID.
     """
-    logger.info(f"Order Service: Fetching items for order ID: {order_id}")
+    logger.info("Order Service: Fetching items for order ID: %s", order_id)
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if not order:
         logger.warning(
-            f"Order Service: Order with ID {order_id} not found when fetching items."
+            "Order Service: Order with ID %s not found when fetching items.", order_id
         )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
 
-    # Access items through the relationship
-    logger.info(
-        f"Order Service: Retrieved {len(order.items)} items for order {order_id}."
-    )
+    logger.info("Order Service: Retrieved %s items for order %s.", len(order.items), order_id)
     return order.items
