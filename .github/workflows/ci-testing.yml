@@ -15,7 +15,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
+          POSTGRES_DB: postgres   # create default 'postgres', we'll use our own DB names
         ports:
           - 5432:5432
         options: >-
@@ -23,11 +23,19 @@ jobs:
           --health-interval=10s --health-timeout=5s --health-retries=5
 
     strategy:
+      fail-fast: false
       matrix:
-        svc: [product_service, customer_service, order_service]
+        include:
+          - svc: product_service
+            db: products
+          - svc: customer_service
+            db: customers
+          - svc: order_service
+            db: orders
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -40,15 +48,25 @@ jobs:
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install pytest
 
+      # ensure the DB for this service exists (create if missing)
+      - name: Create DB for ${{ matrix.db }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          psql "host=localhost user=postgres password=postgres port=5432 dbname=postgres" -c "SELECT 1 FROM pg_database WHERE datname='${{ matrix.db }}'" | grep -q 1 || \
+          psql "host=localhost user=postgres password=postgres port=5432 dbname=postgres" -c "CREATE DATABASE ${{ matrix.db }};"
+
       - name: Run pytest
         working-directory: backend/${{ matrix.svc }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
+          POSTGRES_DB: ${{ matrix.db }}
           POSTGRES_HOST: postgres
           POSTGRES_PORT: 5432
-        run: pytest -q
+        run: |
+          echo "Running tests for ${{ matrix.svc }} against DB=${{ matrix.db }}"
+          pytest -vv -rA
+
 
   build_push:
     name: Build & Push images to ACR
