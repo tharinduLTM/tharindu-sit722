@@ -1,13 +1,12 @@
-# syntax=docker/dockerfile:1
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci || npm install
-COPY . .
-RUN npm run build
-
+# static site – no Node build needed
 FROM nginx:alpine
-# If you use CRA, change "dist" to "build"
-COPY --from=build /app/dist /usr/share/nginx/html
+
+# if you have an Nginx vhost file, ship it (optional)
+# comment this line out if your nginx.conf is a full nginx.conf, not a site file
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# copy the static assets
+COPY . /usr/share/nginx/html
+
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
