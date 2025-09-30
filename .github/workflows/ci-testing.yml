@@ -21,7 +21,7 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres"
-          --health-interval=10s --health-timeout=5s --health-retries=10
+          --health-interval=10s --health-timeout=5s --health-retries=12
 
       rabbitmq:
         image: rabbitmq:3
@@ -29,7 +29,7 @@ jobs:
           - 5672:5672
         options: >-
           --health-cmd="rabbitmq-diagnostics -q ping"
-          --health-interval=10s --health-timeout=5s --health-retries=10
+          --health-interval=10s --health-timeout=5s --health-retries=12
 
     strategy:
       fail-fast: false
@@ -49,11 +49,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Build essentials in case psycopg2 needs compilation; also psql client for checks
-      - name: Install system deps
+      - name: Install system deps (+psql client)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y build-essential libpq-dev postgresql-client
+          python -V
 
       - name: Install Python deps
         working-directory: backend/${{ matrix.svc }}
@@ -61,10 +61,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          # ensure psycopg2-binary present even if not listed
+          # ensure driver is present even if not pinned
           pip install "psycopg2-binary>=2.9"
+          pip freeze | sort | sed -n '1,120p'
 
-      # Wait until Postgres is really ready
       - name: Wait for Postgres readiness
         run: |
           for i in {1..30}; do
@@ -72,23 +72,44 @@ jobs:
             echo "Postgres not ready yet..."; sleep 2
           done
 
-      # Create a DB dedicated to this service (idempotent)
       - name: Create DB ${{ matrix.db }}
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -p 5432 -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${{ matrix.db }}'" | grep -q 1 \
             || PGPASSWORD=postgres psql -h localhost -U postgres -p 5432 -d postgres -c "CREATE DATABASE ${{ matrix.db }};"
 
-      - name: Run pytest
+      - name: Initialize schema if app.db is present
         working-directory: backend/${{ matrix.svc }}
         env:
-          PYTHONPATH: ${{ github.workspace }}/backend/${{ matrix.svc }}
           POSTGRES_HOST: postgres
           POSTGRES_PORT: 5432
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: ${{ matrix.db }}
-          # common URL many templates look for
           DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/${{ matrix.db }}
+          SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/${{ matrix.db }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.append(os.getcwd())
+          try:
+              from app.db import Base, engine
+              Base.metadata.create_all(bind=engine)
+              print("✅ Created tables via Base.metadata.create_all(...)")
+          except Exception as e:
+              print("ℹ️ Schema init skipped or not needed:", repr(e))
+          PY
+
+      - name: Run pytest (verbose)
+        working-directory: backend/${{ matrix.svc }}
+        env:
+          TESTING: "1"
+          POSTGRES_HOST: postgres
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ${{ matrix.db }}
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/${{ matrix.db }}
+          SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/${{ matrix.db }}
           RABBITMQ_HOST: rabbitmq
           RABBITMQ_PORT: 5672
           RABBITMQ_USER: guest
